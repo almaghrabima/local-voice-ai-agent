@@ -16,7 +16,7 @@ def echo(audio):
     transcript = stt_model.stt(audio)
     logger.debug(f"🎤 Transcript: {transcript}")
     response = chat(
-        model="gemma3:4b",
+        model="gemma4:e4b-mlx",
         messages=[
             {
                 "role": "system",
@@ -24,9 +24,12 @@ def echo(audio):
             },
             {"role": "user", "content": transcript},
         ],
-        options={"num_predict": 200},
     )
-    response_text = response["message"]["content"]
+    response_text = response["message"]["content"].strip()
+    if not response_text:
+        # Guard: some models occasionally return an empty completion, which
+        # would make the agent play no audio and appear unresponsive.
+        response_text = "Sorry, I didn't catch that. Could you say it again?"
     logger.debug(f"🤖 Response: {response_text}")
     for audio_chunk in tts_model.stream_tts_sync(response_text):
         yield audio_chunk
