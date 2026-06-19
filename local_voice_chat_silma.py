@@ -1,15 +1,20 @@
 """Bilingual (Arabic + English) local voice chat with silma TTS.
 
-Pipeline: faster-whisper STT (auto-detects the spoken language) -> gemma4:31b-cloud
-(replies in that same language) -> silma sidecar (silma_tts_server.py) speaks it
-with the matching reference voice. Just talk in Arabic or English and it follows.
+Pipeline: STT (auto-detects the spoken language) -> gemma4:31b-cloud (replies in
+that same language) -> silma sidecar (silma_tts_server.py) speaks it with the
+matching reference voice. Just talk in Arabic or English and it follows.
+
+Two selectable STT backends (--stt):
+  * whisper  (default) faster-whisper "base", local on CPU, ~0.6s.
+  * nemotron mlx-community/nemotron-3.5-asr-streaming-0.6b via mlx-audio. Runs
+             locally on Apple Silicon (MLX), ~0.2s warm, Arabic + English.
 
 Start the sidecar first (or use run_silma.sh which does both):
 
     ~/Documents/tts-benchmark/.venvs/tts/bin/python silma_tts_server.py
-    python local_voice_chat_silma.py             # auto-detect language (default)
-    python local_voice_chat_silma.py --voice en  # force English voice
-    python local_voice_chat_silma.py --voice ar  # force Arabic voice
+    python local_voice_chat_silma.py                  # whisper STT, auto voice
+    python local_voice_chat_silma.py --stt nemotron   # local MLX nemotron STT
+    python local_voice_chat_silma.py --voice ar        # force Arabic voice
 """
 import io
 import re
@@ -20,29 +25,61 @@ import numpy as np
 import requests
 import soundfile as sf
 from fastrtc import ReplyOnPause, Stream
-from faster_whisper import WhisperModel
 from loguru import logger
 from ollama import chat
 
 logger.remove(0)
 logger.add(sys.stderr, level="DEBUG")
 
-# Multilingual STT. "base" is the speed/quality sweet spot here (~0.6s, and it
-# transcribes Arabic + English correctly); it also reports the detected language
-# so we can answer and speak in the same one.
-stt_model = WhisperModel("base", device="cpu", compute_type="int8")
-list(stt_model.transcribe(np.zeros(16000, dtype=np.float32))[0])  # warm up
+# --- speech-to-text backends -------------------------------------------------
+STT_BACKEND = "whisper"  # set by argparse: "whisper" | "nemotron"
+# MLX port of NVIDIA's nemotron ASR -- runs natively on Apple Silicon.
+NEMOTRON_MODEL = "mlx-community/nemotron-3.5-asr-streaming-0.6b"
+_whisper = None
+_nemotron = None
 
 
-def transcribe(audio) -> tuple[str, str]:
-    """Return (text, language) from a fastrtc (sample_rate, int16 ndarray)."""
+def init_stt() -> None:
+    """Load/prepare the selected STT backend (and surface errors early)."""
+    global _whisper, _nemotron
+    if STT_BACKEND == "whisper":
+        from faster_whisper import WhisperModel
+        # "base" is the speed/quality sweet spot here: ~0.6s, correct on both
+        # Arabic and English, and it reports the detected language.
+        _whisper = WhisperModel("base", device="cpu", compute_type="int8")
+        list(_whisper.transcribe(np.zeros(16000, dtype=np.float32))[0])  # warm up
+    elif STT_BACKEND == "nemotron":
+        import mlx.core as mx
+        from mlx_audio.stt import load
+        _nemotron = load(NEMOTRON_MODEL)
+        _nemotron.generate(mx.array(np.zeros(16000, dtype=np.float32)))  # warm/compile
+
+
+def _to_16k_mono(audio) -> np.ndarray:
+    """fastrtc (sample_rate, int16 ndarray) -> 16 kHz mono float32."""
     sr, arr = audio
     a = np.asarray(arr).reshape(-1).astype(np.float32) / 32768.0
-    if sr != 16000:  # faster-whisper expects 16 kHz mono float32
+    if sr != 16000:
         n = round(len(a) * 16000 / sr)
         a = np.interp(np.linspace(0, len(a), n, endpoint=False),
                       np.arange(len(a)), a).astype(np.float32)
-    segments, info = stt_model.transcribe(a, beam_size=1)
+    return a
+
+
+def _detect_lang(text: str) -> str:
+    """Pick voice language from the transcript script (nemotron returns no
+    language field). Any Arabic-range codepoint -> Arabic, else English."""
+    return "ar" if any("؀" <= c <= "ۿ" for c in text) else "en"
+
+
+def transcribe(audio) -> tuple[str, str]:
+    """Return (text, language) from a fastrtc audio chunk."""
+    a = _to_16k_mono(audio)
+    if STT_BACKEND == "nemotron":
+        import mlx.core as mx
+        text = (_nemotron.generate(mx.array(a)).text or "").strip()
+        return text, _detect_lang(text)
+    segments, info = _whisper.transcribe(a, beam_size=1)
     text = "".join(s.text for s in segments).strip()
     return text, info.language
 
@@ -156,9 +193,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Bilingual local voice chat with silma TTS")
     parser.add_argument("--voice", choices=["auto", "en", "ar"], default="auto",
                         help="silma voice: auto = follow detected language (default)")
+    parser.add_argument("--stt", choices=["whisper", "nemotron"], default="whisper",
+                        help="speech-to-text backend: whisper (faster-whisper, default) "
+                             "or nemotron (local MLX nemotron via mlx-audio, ~0.2s warm)")
     args = parser.parse_args()
     VOICE = args.voice
+    STT_BACKEND = args.stt
 
-    logger.info(f"Launching bilingual silma voice chat (voice={VOICE})...")
+    logger.info(f"Initializing STT backend: {STT_BACKEND}...")
+    init_stt()
+    logger.info(f"Launching bilingual silma voice chat (voice={VOICE}, stt={STT_BACKEND})...")
     stream = Stream(ReplyOnPause(echo), modality="audio", mode="send-receive")
     stream.ui.launch()

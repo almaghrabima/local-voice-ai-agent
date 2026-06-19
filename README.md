@@ -42,9 +42,13 @@ uv sync
 
 ### 4. Download required models in Ollama
 
+The scripts currently use `gemma4:31b-cloud` (an Ollama Cloud model — replies
+leave your machine). Pull whichever model you want to run and set it in the
+script, e.g.:
+
 ```bash
-ollama pull gemma3:1b
-# For advanced version
+ollama pull gemma4:31b-cloud
+# or a fully-local model:
 ollama pull gemma3:4b
 ```
 
@@ -70,6 +74,65 @@ python local_voice_chat_advanced.py --phone
 ```
 
 This will provide you with a temporary phone number that you can call to interact with the AI using your voice.
+
+### Bilingual Voice Chat with silma TTS (Arabic + English)
+
+`local_voice_chat_silma.py` is a bilingual variant: speak **Arabic or English**
+and it auto-detects the language, replies in that same language, and speaks the
+reply with the [silma-ai/silma-tts](https://huggingface.co/silma-ai/silma-tts)
+voice that matches.
+
+Instead of Kokoro, it streams speech from silma (an F5-TTS model). Because
+silma needs heavy `f5_tts` / `torch` dependencies, it runs as a small HTTP
+**sidecar** in its own environment, while the voice agent stays in this
+project's `.venv`.
+
+**Additional prerequisites:**
+
+- The silma weights (`model.pt`, `vocab.txt`) and reference voices, plus a
+  Python env with `f5_tts` installed. This setup lives in a sibling
+  `~/Documents/tts-benchmark` project; the sidecar reads the weights from there
+  and the trimmed English reference voice from this repo's `refs/`. Adjust the
+  paths at the top of `silma_tts_server.py` if yours differ.
+- `faster-whisper` (already in this project's dependencies) for multilingual
+  speech-to-text.
+
+**Run it (sidecar + agent together):**
+
+```bash
+./run_silma.sh            # English/Arabic voice, auto-selected per utterance
+./run_silma.sh ar         # force the Arabic reference voice
+```
+
+Or start the two processes manually:
+
+```bash
+# 1) silma TTS sidecar (in the env that has f5_tts)
+~/Documents/tts-benchmark/.venvs/tts/bin/python silma_tts_server.py
+
+# 2) the voice agent (in this project's .venv)
+python local_voice_chat_silma.py
+```
+
+**Speech-to-text backends (`--stt`):**
+
+| Backend | Where it runs | Notes |
+| --- | --- | --- |
+| `whisper` (default) | local, CPU | `faster-whisper base`, ~0.6s, Arabic + English |
+| `nemotron` | local, Apple Silicon (MLX) | [`mlx-community/nemotron-3.5-asr-streaming-0.6b`](https://huggingface.co/mlx-community/nemotron-3.5-asr-streaming-0.6b) via [`mlx-audio`](https://github.com/Blaizzy/mlx-audio), ~0.2s warm, Arabic + English. The model (~1.3 GB) downloads from Hugging Face on first run. |
+
+`nemotron` needs `mlx-audio` (not on PyPI yet — install from git):
+
+```bash
+uv pip install "git+https://github.com/Blaizzy/mlx-audio.git"
+python local_voice_chat_silma.py --stt nemotron   # local MLX nemotron ASR
+python local_voice_chat_silma.py --voice ar         # force Arabic voice
+```
+
+**Tuning notes:** speech-to-first-audio is kept low (~2s) via a trimmed ~2.5s
+reference clip, `nfe_step=12`, `speed=1.15`, and sentence/first-phrase
+streaming — see the constants at the top of `local_voice_chat_silma.py` and
+`silma_tts_server.py`.
 
 ## How it works
 
