@@ -119,17 +119,18 @@ def _split_first(first: str) -> list[str]:
 VOICE = "auto"
 
 
-def speakable_chunks(text: str) -> list[str]:
+def speakable_chunks(text: str, split_first: bool = True) -> list[str]:
     """Break a reply into units we synthesize and stream one at a time.
 
-    The first unit is kept short (the opening sentence is split at a comma or
-    word boundary near FIRST_CHUNK_MAX) so the user hears audio in ~1-2s; later
-    units stay sentence-sized for natural prosody. Tiny fragments are merged to
+    With split_first, the opening sentence is split at a comma/word boundary
+    near FIRST_CHUNK_MAX so the user hears audio in ~1-2s; later units stay
+    sentence-sized. Disable it for Arabic: diacritics inflate the character
+    count and would trigger early, choppy splits. Tiny fragments are merged to
     avoid silma's <10-byte slow path."""
     sentences = [s.strip() for s in re.split(r"(?<=[.!?؟…])\s+", text.strip()) if s.strip()]
     if not sentences:
         return []
-    chunks = _split_first(sentences[0]) + sentences[1:]
+    chunks = (_split_first(sentences[0]) if split_first else [sentences[0]]) + sentences[1:]
     # merge any too-short fragment into the next one
     merged: list[str] = []
     for c in chunks:
@@ -145,7 +146,8 @@ def silma_tts(text: str, voice: str):
     chunks. The first sentence starts playing while later ones are still
     generating, so the user hears audio in ~1-2s instead of after the whole
     reply is rendered."""
-    for sentence in speakable_chunks(text):
+    # Arabic: keep whole sentences (no aggressive first-phrase split).
+    for sentence in speakable_chunks(text, split_first=(voice != "ar")):
         try:
             resp = requests.post(
                 SILMA_URL,
@@ -174,7 +176,7 @@ def echo(audio):
         messages=[
             {
                 "role": "system",
-                "content": "You are a helpful voice assistant in a live call. Reply in the SAME language the user spoke (Arabic or English). Keep it to one or two short, natural sentences. Your reply is read aloud, so use plain conversational text only: no markdown, lists, bullet points, emojis, or special characters.",
+                "content": "You are a helpful voice assistant in a live call. Reply in the SAME language the user spoke (Arabic or English). If you reply in Arabic, write it FULLY diacritized with tashkeel (vowel marks) on every word, because a text-to-speech system reads it aloud and needs the diacritics for correct pronunciation. Keep it to one or two short, natural sentences. Your reply is read aloud, so use plain conversational prose only: no markdown, lists, bullet points, or emojis.",
             },
             {"role": "user", "content": transcript},
         ],
