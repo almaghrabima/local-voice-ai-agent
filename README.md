@@ -75,26 +75,32 @@ python local_voice_chat_advanced.py --phone
 
 This will provide you with a temporary phone number that you can call to interact with the AI using your voice.
 
-### Bilingual Voice Chat with Supertonic TTS (Arabic + English, recommended)
+### Bilingual Voice Chat (Arabic + English, recommended)
 
 `local_voice_chat_supertonic.py` is the recommended bilingual variant: speak
 **Arabic or English** and it auto-detects the language, replies in that same
-language, and speaks it with [Supertonic](https://github.com/supertone-inc/supertonic).
+language, and speaks it back. It has two selectable TTS backends (`--tts`):
 
-Supertonic is a compact ONNX TTS that runs **fast on the CPU** (RTF ~0.2) with
-**no GPU, no sidecar, and no reference voice** — it takes the language per call.
-That keeps the GPU free for STT and makes this the simplest setup.
+| TTS backend | Engine | Speed (M2) | Arabic | Notes |
+| --- | --- | --- | --- | --- |
+| `supertonic` (default) | [Supertonic](https://github.com/supertone-inc/supertonic), ONNX/CPU | **RTF ~0.2 (fast)** | MSA-leaning | No GPU, no reference voice; preset voices `M1`–`M5`/`F1`–`F5` |
+| `omnivoice` | [OmniVoice](https://github.com/k2-fsa/OmniVoice), PyTorch | RTF ~5 CPU / ~2–4 MPS (slow) | **Najdi/Saudi** via voice cloning | Clones a Najdi reference clip; needs `omnivoice` installed |
 
 ```bash
-uv pip install supertonic   # already in pyproject; ONNX, downloads the model on first run
-python local_voice_chat_supertonic.py                  # whisper STT (default)
+python local_voice_chat_supertonic.py                  # supertonic + whisper (default)
+python local_voice_chat_supertonic.py --tts omnivoice  # Najdi/Saudi Arabic (slow)
 python local_voice_chat_supertonic.py --stt nemotron   # local MLX nemotron STT
-python local_voice_chat_supertonic.py --voice-style F1  # pick a voice: M1-M5 or F1-F5
+python local_voice_chat_supertonic.py --voice-style F1  # supertonic voice: M1-M5 / F1-F5
 ```
 
-It shares the same STT backends as the silma variant (`--stt whisper|nemotron`,
-see the table below). Speech-to-text runs on the CPU (whisper) so it doesn't
-compete with anything for the GPU.
+**STT backends** are shared with the silma variant (`--stt whisper|nemotron`, see
+the table below); whisper runs on the CPU so it doesn't compete for the GPU.
+
+**OmniVoice notes:** install it with `uv pip install omnivoice` (pulls PyTorch).
+It clones Najdi Arabic from `tts-benchmark/data/refs/ar_speaker.wav` and English
+from `en_speaker.wav`. It runs on **CPU by default** (reliable but ~RTF 5, so
+several seconds per reply); set `OMNIVOICE_DEVICE=mps` to use the GPU when it has
+free memory (faster, but it OOMs under memory pressure since Metal shares RAM).
 
 ### Bilingual Voice Chat with silma TTS (Arabic + English)
 

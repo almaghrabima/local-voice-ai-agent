@@ -1,29 +1,35 @@
-"""Bilingual (Arabic + English) local voice chat with Supertonic TTS.
+"""Bilingual (Arabic + English) local voice chat with selectable TTS.
 
 Pipeline: STT (auto-detects the spoken language) -> gemma4:31b-cloud (replies in
-that same language) -> Supertonic speaks it. Just talk in Arabic or English.
+that same language) -> TTS speaks it. Just talk in Arabic or English.
 
-Supertonic (https://github.com/supertone-inc/supertonic) is a compact ONNX TTS
-that runs fast on the CPU -- no GPU, no sidecar, no reference voice, and it takes
-the language per call. That keeps the GPU free and removes the silma sidecar.
+Two selectable TTS backends (--tts):
+  * supertonic (default) https://github.com/supertone-inc/supertonic -- compact
+                ONNX TTS, fast on CPU (RTF ~0.2), no GPU/sidecar/reference. Arabic
+                is MSA-leaning. Voice from presets (M1-M5/F1-F5).
+  * omnivoice   https://github.com/k2-fsa/OmniVoice -- diffusion TTS that clones a
+                reference voice. Uses a Najdi/Saudi Arabic reference clip for
+                Arabic and an English reference for English. Higher quality dialect
+                but much slower on Mac (RTF ~2-4, ~140s to load).
 
 Two selectable STT backends (--stt):
   * whisper  (default) faster-whisper "base", local on CPU, ~0.6s.
   * nemotron mlx-community/nemotron-3.5-asr-streaming-0.6b via mlx-audio (MLX).
 
-    python local_voice_chat_supertonic.py                 # whisper STT
-    python local_voice_chat_supertonic.py --stt nemotron  # MLX nemotron STT
-    python local_voice_chat_supertonic.py --voice-style F1 # different speaker
+    python local_voice_chat_supertonic.py                  # supertonic + whisper
+    python local_voice_chat_supertonic.py --tts omnivoice  # Najdi voice cloning
+    python local_voice_chat_supertonic.py --stt nemotron   # MLX nemotron STT
+    python local_voice_chat_supertonic.py --voice-style F1 # supertonic speaker
 """
 import re
 import sys
 import argparse
+from pathlib import Path
 
 import numpy as np
 from fastrtc import ReplyOnPause, Stream
 from loguru import logger
 from ollama import chat
-from supertonic import TTS
 
 logger.remove(0)
 logger.add(sys.stderr, level="DEBUG")
@@ -77,20 +83,46 @@ def transcribe(audio) -> tuple[str, str]:
     return text, info.language
 
 
-# --- text-to-speech (Supertonic) ---------------------------------------------
-SAMPLE_RATE = 44100      # Supertonic output rate
-TOTAL_STEPS = 8          # flow-matching steps (quality/speed; 8 is the default)
+# --- text-to-speech backends -------------------------------------------------
+TTS_BACKEND = "supertonic"  # set by argparse: "supertonic" | "omnivoice"
+CHUNK_SAMPLES = 8192        # frames to the browser
+
+# Supertonic
+TOTAL_STEPS = 8             # flow-matching steps (quality/speed; 8 is the default)
 SPEED = 1.05
-CHUNK_SAMPLES = 8192     # ~0.19s frames to the browser
-VOICE_STYLE = "M1"       # set by argparse
-_tts = None
-_style = None
+VOICE_STYLE = "M1"          # set by argparse (M1-M5/F1-F5)
+SUP_SR = 44100
+_sup_tts = None
+_sup_style = None
+
+# OmniVoice -- reference clips for voice cloning (Najdi Arabic + English).
+_TTS_BENCH = Path.home() / "Documents" / "tts-benchmark" / "data" / "refs"
+OMNI_REFS = {
+    "en": (_TTS_BENCH / "en_speaker.wav", "Some call me nature, others call me mother nature."),
+    "ar": (_TTS_BENCH / "ar_speaker.wav",  # Najdi/Saudi dialect reference
+           "تكفى طمني انا اليوم ماني بنايم ولا هو بداخل عيني النوم الين اتطمن عليه."),
+}
+OMNI_SR = 24000
+_omni = None
 
 
 def init_tts() -> None:
-    global _tts, _style
-    _tts = TTS(auto_download=True)
-    _style = _tts.get_voice_style(voice_name=VOICE_STYLE)
+    """Load the selected TTS backend (surfaces download/load cost up front)."""
+    global _sup_tts, _sup_style, _omni
+    if TTS_BACKEND == "supertonic":
+        from supertonic import TTS
+        _sup_tts = TTS(auto_download=True)
+        _sup_style = _sup_tts.get_voice_style(voice_name=VOICE_STYLE)
+    elif TTS_BACKEND == "omnivoice":
+        import os
+        import torch
+        from omnivoice import OmniVoice
+        # Metal (MPS) shares RAM with every other app, so OmniVoice OOMs mid-run
+        # under memory pressure. CPU is slower (~RTF 5) but reliable, so it is the
+        # default; set OMNIVOICE_DEVICE=mps to use the GPU when it has headroom.
+        device = os.environ.get("OMNIVOICE_DEVICE", "cpu")
+        _omni = OmniVoice.from_pretrained("k2-fsa/OmniVoice", device_map=device, dtype=torch.float32)
+        logger.info(f"OmniVoice running on {device} (set OMNIVOICE_DEVICE=mps for GPU if it has free memory).")
 
 
 def _sentences(text: str) -> list[str]:
@@ -98,15 +130,24 @@ def _sentences(text: str) -> list[str]:
     return [s.strip() for s in re.split(r"(?<=[.!?؟…])\s+", text.strip()) if s.strip()]
 
 
-def supertonic_tts(text: str, lang: str):
-    """Synthesize sentence-by-sentence and yield (sample_rate, float32 frame)
-    chunks, so the first sentence plays while later ones generate."""
+def tts_synthesize(text: str, lang: str):
+    """Synthesize sentence-by-sentence with the active backend and yield
+    (sample_rate, float32 frame) chunks so the first sentence plays while later
+    ones generate."""
     for sentence in _sentences(text):
-        wav, _ = _tts.synthesize(text=sentence, voice_style=_style,
-                                 total_steps=TOTAL_STEPS, speed=SPEED, lang=lang)
-        audio = np.asarray(wav, dtype=np.float32).reshape(-1)
+        if TTS_BACKEND == "omnivoice":
+            ref_wav, ref_text = OMNI_REFS["ar" if lang == "ar" else "en"]
+            out = _omni.generate(text=sentence, language=lang,
+                                 ref_audio=str(ref_wav), ref_text=ref_text)
+            audio = np.asarray(out[0], dtype=np.float32).reshape(-1)
+            sr = OMNI_SR
+        else:  # supertonic
+            wav, _ = _sup_tts.synthesize(text=sentence, voice_style=_sup_style,
+                                         total_steps=TOTAL_STEPS, speed=SPEED, lang=lang)
+            audio = np.asarray(wav, dtype=np.float32).reshape(-1)
+            sr = SUP_SR
         for start in range(0, len(audio), CHUNK_SAMPLES):
-            yield SAMPLE_RATE, audio[start:start + CHUNK_SAMPLES].reshape(1, -1)
+            yield sr, audio[start:start + CHUNK_SAMPLES].reshape(1, -1)
 
 
 def echo(audio):
@@ -130,22 +171,26 @@ def echo(audio):
         response_text = "عذرا لم افهم. هل يمكنك الاعادة؟" if voice_lang == "ar" else \
             "Sorry, I didn't catch that. Could you say it again?"
     logger.debug(f"🤖 [{voice_lang}] Response: {response_text}")
-    yield from supertonic_tts(response_text, voice_lang)
+    yield from tts_synthesize(response_text, voice_lang)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Bilingual local voice chat with Supertonic TTS")
+    parser = argparse.ArgumentParser(description="Bilingual local voice chat (Supertonic / OmniVoice)")
+    parser.add_argument("--tts", choices=["supertonic", "omnivoice"], default="supertonic",
+                        help="text-to-speech backend: supertonic (fast, default) or "
+                             "omnivoice (Najdi/Saudi Arabic voice cloning, slower)")
     parser.add_argument("--stt", choices=["whisper", "nemotron"], default="whisper",
                         help="speech-to-text backend (default: whisper)")
     parser.add_argument("--voice-style", default="M1",
-                        help="Supertonic voice: M1-M5 or F1-F5 (default: M1)")
+                        help="Supertonic voice: M1-M5 or F1-F5 (default: M1; ignored for omnivoice)")
     args = parser.parse_args()
     STT_BACKEND = args.stt
+    TTS_BACKEND = args.tts
     VOICE_STYLE = args.voice_style
 
-    logger.info(f"Initializing STT ({STT_BACKEND}) and Supertonic TTS (voice {VOICE_STYLE})...")
+    logger.info(f"Initializing STT ({STT_BACKEND}) and TTS ({TTS_BACKEND})...")
     init_stt()
     init_tts()
-    logger.info(f"Launching Supertonic voice chat (stt={STT_BACKEND}, voice={VOICE_STYLE})...")
+    logger.info(f"Launching voice chat (stt={STT_BACKEND}, tts={TTS_BACKEND})...")
     stream = Stream(ReplyOnPause(echo), modality="audio", mode="send-receive")
     stream.ui.launch()
