@@ -75,6 +75,27 @@ python local_voice_chat_advanced.py --phone
 
 This will provide you with a temporary phone number that you can call to interact with the AI using your voice.
 
+### Bilingual Voice Chat with Supertonic TTS (Arabic + English, recommended)
+
+`local_voice_chat_supertonic.py` is the recommended bilingual variant: speak
+**Arabic or English** and it auto-detects the language, replies in that same
+language, and speaks it with [Supertonic](https://github.com/supertone-inc/supertonic).
+
+Supertonic is a compact ONNX TTS that runs **fast on the CPU** (RTF ~0.2) with
+**no GPU, no sidecar, and no reference voice** — it takes the language per call.
+That keeps the GPU free for STT and makes this the simplest setup.
+
+```bash
+uv pip install supertonic   # already in pyproject; ONNX, downloads the model on first run
+python local_voice_chat_supertonic.py                  # whisper STT (default)
+python local_voice_chat_supertonic.py --stt nemotron   # local MLX nemotron STT
+python local_voice_chat_supertonic.py --voice-style F1  # pick a voice: M1-M5 or F1-F5
+```
+
+It shares the same STT backends as the silma variant (`--stt whisper|nemotron`,
+see the table below). Speech-to-text runs on the CPU (whisper) so it doesn't
+compete with anything for the GPU.
+
 ### Bilingual Voice Chat with silma TTS (Arabic + English)
 
 `local_voice_chat_silma.py` is a bilingual variant: speak **Arabic or English**
