@@ -93,6 +93,23 @@ NFE_STEP = 12
 SPEED = 1.15
 FIRST_CHUNK_MAX = 32  # chars: keep the first spoken unit short for fast first audio
 MIN_CHUNK_BYTES = 12  # below ~10 bytes silma forces speed=0.3, which is slower
+FIRST_WORDS_AR = 6    # Arabic: words in the first streamed chunk (word-based, since
+                      # diacritics inflate the character count)
+
+
+def _merge_tiny(chunks: list[str]) -> list[str]:
+    """Fold any sub-MIN_CHUNK_BYTES fragment into the previous chunk so silma
+    never hits its slow <10-byte path."""
+    merged: list[str] = []
+    for c in chunks:
+        c = c.strip()
+        if not c:
+            continue
+        if len(c.encode("utf-8")) < MIN_CHUNK_BYTES and merged:
+            merged[-1] = f"{merged[-1]} {c}".strip()
+        else:
+            merged.append(c)
+    return merged
 
 
 def _split_first(first: str) -> list[str]:
@@ -131,14 +148,22 @@ def speakable_chunks(text: str, split_first: bool = True) -> list[str]:
     if not sentences:
         return []
     chunks = (_split_first(sentences[0]) if split_first else [sentences[0]]) + sentences[1:]
-    # merge any too-short fragment into the next one
-    merged: list[str] = []
-    for c in chunks:
-        if c and len(c.encode("utf-8")) < MIN_CHUNK_BYTES and merged:
-            merged[-1] = f"{merged[-1]} {c}".strip()
-        elif c:
-            merged.append(c)
-    return merged
+    return _merge_tiny(chunks)
+
+
+def arabic_chunks(text: str) -> list[str]:
+    """Gentle streaming split for Arabic. Splits on natural pause punctuation
+    (Arabic comma/semicolon and sentence enders), then, if the first clause is
+    still long, splits it at a word boundary after FIRST_WORDS_AR words so audio
+    starts sooner. Word-based (not character-based) so diacritics don't cause
+    early, choppy splits."""
+    parts = [p.strip() for p in re.split(r"(?<=[.!?؟…،؛])\s+", text.strip()) if p.strip()]
+    if not parts:
+        return []
+    words = parts[0].split()
+    if len(words) > FIRST_WORDS_AR + 2:  # only split a clearly-long opening clause
+        parts = [" ".join(words[:FIRST_WORDS_AR]), " ".join(words[FIRST_WORDS_AR:])] + parts[1:]
+    return _merge_tiny(parts)
 
 
 def silma_tts(text: str, voice: str):
@@ -146,8 +171,8 @@ def silma_tts(text: str, voice: str):
     chunks. The first sentence starts playing while later ones are still
     generating, so the user hears audio in ~1-2s instead of after the whole
     reply is rendered."""
-    # Arabic: keep whole sentences (no aggressive first-phrase split).
-    for sentence in speakable_chunks(text, split_first=(voice != "ar")):
+    chunks = arabic_chunks(text) if voice == "ar" else speakable_chunks(text)
+    for sentence in chunks:
         try:
             resp = requests.post(
                 SILMA_URL,
