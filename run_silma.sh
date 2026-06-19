@@ -4,10 +4,14 @@
 # runs in this project's .venv (which has fastrtc). Stops both on Ctrl-C.
 set -euo pipefail
 
+# Usage: ./run_silma.sh [voice] [stt]
+#   voice: auto|en|ar   (default: auto)
+#   stt:   whisper|nemotron   (default: whisper)
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TTS_PY="$HOME/Documents/tts-benchmark/.venvs/tts/bin/python"
 AGENT_PY="$HERE/.venv/bin/python"
-VOICE="${1:-en}"
+VOICE="${1:-auto}"
+STT="${2:-whisper}"
 
 [ -x "$TTS_PY" ]   || { echo "missing $TTS_PY"; exit 1; }
 [ -x "$AGENT_PY" ] || { echo "missing $AGENT_PY"; exit 1; }
@@ -27,5 +31,5 @@ for _ in $(seq 1 180); do
   sleep 1
 done
 
-echo "[run_silma] starting voice agent (voice=$VOICE)..."
-PYTHONUNBUFFERED=1 "$AGENT_PY" "$HERE/local_voice_chat_silma.py" --voice "$VOICE"
+echo "[run_silma] starting voice agent (voice=$VOICE, stt=$STT)..."
+PYTHONUNBUFFERED=1 "$AGENT_PY" "$HERE/local_voice_chat_silma.py" --voice "$VOICE" --stt "$STT"

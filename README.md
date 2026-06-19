@@ -100,8 +100,9 @@ project's `.venv`.
 **Run it (sidecar + agent together):**
 
 ```bash
-./run_silma.sh            # English/Arabic voice, auto-selected per utterance
-./run_silma.sh ar         # force the Arabic reference voice
+./run_silma.sh                 # auto voice, whisper STT
+./run_silma.sh ar              # force the Arabic reference voice
+./run_silma.sh auto nemotron   # auto voice, local MLX nemotron STT
 ```
 
 Or start the two processes manually:
