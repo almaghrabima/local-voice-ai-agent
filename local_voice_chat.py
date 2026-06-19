@@ -8,7 +8,7 @@ tts_model = get_tts_model()  # kokoro
 def echo(audio):
     transcript = stt_model.stt(audio)
     response = chat(
-        model="gemma4:e4b-mlx", messages=[{"role": "user", "content": transcript}]
+        model="gemma4:31b-cloud", messages=[{"role": "user", "content": transcript}]
     )
     response_text = response["message"]["content"]
     for audio_chunk in tts_model.stream_tts_sync(response_text):

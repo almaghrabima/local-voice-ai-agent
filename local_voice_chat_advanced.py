@@ -16,7 +16,7 @@ def echo(audio):
     transcript = stt_model.stt(audio)
     logger.debug(f"🎤 Transcript: {transcript}")
     response = chat(
-        model="gemma4:e4b-mlx",
+        model="gemma4:31b-cloud",
         messages=[
             {
                 "role": "system",
